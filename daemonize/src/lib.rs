@@ -34,6 +34,7 @@
 //!         .umask(0o777)    // Set umask, `0o027` by default.
 //!         .stdout(stdout)  // Redirect stdout to `/tmp/daemon.out`.
 //!         .stderr(stderr)  // Redirect stderr to `/tmp/daemon.err`.
+//!         .exit_action(|| println!("Executed before master process exits"))
 //!         .privileged_action(|| "Executed before drop privileges");
 //!
 //!     match daemonize.start() {
@@ -236,6 +237,7 @@ pub struct Daemonize<T> {
     umask: Mask,
     root: Option<PathBuf>,
     privileged_action: Box<dyn FnOnce() -> T>,
+    exit_action: Box<dyn FnOnce()>,
     stdin: Stdio,
     stdout: Stdio,
     stderr: Stdio,
@@ -274,6 +276,7 @@ impl Daemonize<()> {
             group: None,
             umask: 0o027.into(),
             privileged_action: Box::new(|| ()),
+            exit_action: Box::new(|| ()),
             root: None,
             stdin: Stdio::devnull(),
             stdout: Stdio::devnull(),
@@ -333,6 +336,13 @@ impl<T> Daemonize<T> {
         new
     }
 
+    /// Execute `action` just before exiting the parent process. Most common usecase is to synchronize with
+    /// forked processes.
+    pub fn exit_action<F: FnOnce() + 'static>(mut self, action: F) -> Daemonize<T> {
+        self.exit_action = Box::new(action);
+        self
+    }
+
     /// Configuration for the child process's standard output stream.
     pub fn stdout<S: Into<Stdio>>(mut self, stdio: S) -> Self {
         self.stdout = stdio.into();
@@ -359,7 +369,10 @@ impl<T> Daemonize<T> {
     pub fn execute(self) -> Outcome<T> {
         unsafe {
             match perform_fork() {
-                Ok(Some(_first_child_pid)) => Outcome::Parent(Ok(Parent {})),
+                Ok(Some(_first_child_pid)) => {
+                    (self.exit_action)();
+                    Outcome::Parent(Ok(Parent {}))
+                }
                 Err(err) => Outcome::Parent(Err(err.into())),
                 Ok(None) => match self.execute_child() {
                     Ok(privileged_action_result) => Outcome::Child(Ok(Child {
